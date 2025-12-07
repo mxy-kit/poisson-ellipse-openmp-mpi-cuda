@@ -134,40 +134,14 @@ The project is written in C++ (C++11/14) with MPI, OpenMP and CUDA.
 
 Typical files:
 
-- `poisson_seq.cpp` – sequential version  
-- `poisson_omp.cpp` – OpenMP version  
-- `poisson_mpi.cpp` – MPI version  
-- `poisson_mpi_omp.cpp` – MPI + OpenMP hybrid  
-- `poisson_mpi_cuda.cu`, `poisson_mpi_cuda2.cu` – MPI + CUDA versions  
+- `stage 0` – sequential version  
+- `stage1-oenmmp` – OpenMP version  
+- `stage2-mpi` – MPI version  
+- `stage3-mpi+openmp` – MPI + OpenMP hybrid  
+- `stage4-mpi+cuda`, `poisson_mpi_cuda2.cu` – MPI + CUDA versions  
 
 Utility functions implement grid setup, fictitious domain coefficients,
 halo exchange, PCG iterations and timing.
 
 ---
 
-## 4. Building
-
-**Prerequisites**
-
-- C++ compiler with OpenMP support (e.g. `g++`, `clang++`, `icpc`)
-- MPI implementation (OpenMPI, MPICH, Intel MPI, etc.)
-- CUDA Toolkit (for GPU version)
-
-**Examples**
-
-```bash
-# sequential
-g++ -O3 -std=c++14 poisson_seq.cpp -o poisson_seq
-
-# OpenMP
-g++ -O3 -std=c++14 -fopenmp poisson_omp.cpp -o poisson_omp
-
-# MPI
-mpicxx -O3 -std=c++14 -fopenmp poisson_mpi.cpp -o poisson_mpi
-
-# MPI + OpenMP
-mpicxx -O3 -std=c++14 -fopenmp poisson_mpi_omp.cpp -o poisson_mpi_omp
-
-# MPI + CUDA (sketch)
-mpicxx -O3 -std=c++14 -c mpi_part.cpp
-nvcc   -O3 -std=c++14 poisson_mpi_cuda.cu mpi_part.o -o poisson_mpi_cuda
