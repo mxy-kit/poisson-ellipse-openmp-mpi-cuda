@@ -48,9 +48,9 @@ constant coefficient $k(x,y)$ is used in
 
 $-\nabla\cdot\bigl(k(x,y)\nabla u(x,y)\bigr) = f(x,y)$:
 
-- inside the ellipse $D$: $k(x,y)=1$;
-- outside $D$: $k(x,y)=1/\varepsilon$, where  
-  $\varepsilon = \max(h_x,h_y)^2$ and $h_x,h_y$ are grid steps.
+- inside the ellipse *D*: k(x,y) = 1;
+- outside *D*: k(x,y) = 1/ε, where ε = max(h_x, h_y)^2 and h_x, h_y are grid steps.
+
 
 The rectangle is discretised by a uniform grid of size $M\times N$.
 A finite–difference scheme leads to a large sparse linear system which is
