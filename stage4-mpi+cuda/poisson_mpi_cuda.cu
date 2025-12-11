@@ -330,6 +330,8 @@ void update_p_kernel(double* p,
 
 // ---------------- halo exchange on GPU ----------------
 
+// ---------------- halo exchange on GPU (batched memcpy + memset) ----------------
+
 void exchange_halos_2d_gpu(double* d_p,
                            int local_nx, int local_ny,
                            int Px, int Py,
@@ -345,65 +347,65 @@ void exchange_halos_2d_gpu(double* d_p,
     int down_rank  = (py > 0)      ? (rank - Px)  : MPI_PROC_NULL;
     int up_rank    = (py < Py - 1) ? (rank + Px)  : MPI_PROC_NULL;
 
-    int pitch = local_ny + 2;
+    int pitch           = local_ny + 2;                // stride in elements (по j)
+    size_t row_bytes    = (local_ny + 2) * sizeof(double); // целая "строка" по j
+    size_t col_height   =  local_nx + 2;               // количество li в "колонке"
+    size_t dev_pitch_b  =  pitch * sizeof(double);
+    size_t col_width_b  =  sizeof(double);
+    size_t host_pitch_b =  sizeof(double);
 
-    std::vector<double> send_left(local_ny + 2),  recv_left(local_ny + 2);
-    std::vector<double> send_right(local_ny + 2), recv_right(local_ny + 2);
-    std::vector<double> send_down(local_nx + 2),  recv_down(local_nx + 2);
-    std::vector<double> send_up(local_nx + 2),    recv_up(local_nx + 2);
+    std::vector<double> send_left (local_ny + 2),  recv_left (local_ny + 2);
+    std::vector<double> send_right(local_ny + 2),  recv_right(local_ny + 2);
+    std::vector<double> send_down(local_nx + 2),   recv_down(local_nx + 2);
+    std::vector<double> send_up  (local_nx + 2),   recv_up  (local_nx + 2);
 
-    // --- copy from device to host (pack send buffers) ---
+    // ===== 1) Device -> Host =====
     double t_copy0 = MPI_Wtime();
 
+    // left column: li = 1, lj = 0..local_ny+1  (в памяти это непрерывный блок)
     if (left_rank != MPI_PROC_NULL) {
-        for (int lj = 0; lj <= local_ny + 1; ++lj) {
-            int li  = 1;
-            int idx = li * pitch + lj;
-            checkCuda(cudaMemcpy(&send_left[lj],
-                                 d_p + idx,
-                                 sizeof(double),
-                                 cudaMemcpyDeviceToHost),
-                      "left column D2H");
-        }
+        int li = 1;
+        double* src_ptr = d_p + li * pitch;
+        checkCuda(cudaMemcpy(send_left.data(), src_ptr,
+                             row_bytes, cudaMemcpyDeviceToHost),
+                  "left column D2H");
     }
+
+    // right column: li = local_nx
     if (right_rank != MPI_PROC_NULL) {
-        for (int lj = 0; lj <= local_ny + 1; ++lj) {
-            int li  = local_nx;
-            int idx = li * pitch + lj;
-            checkCuda(cudaMemcpy(&send_right[lj],
-                                 d_p + idx,
-                                 sizeof(double),
-                                 cudaMemcpyDeviceToHost),
-                      "right column D2H");
-        }
+        int li = local_nx;
+        double* src_ptr = d_p + li * pitch;
+        checkCuda(cudaMemcpy(send_right.data(), src_ptr,
+                             row_bytes, cudaMemcpyDeviceToHost),
+                  "right column D2H");
     }
+
+    // bottom row: j = 1, li = 0..local_nx+1 -> колонка
     if (down_rank != MPI_PROC_NULL) {
-        for (int li = 0; li <= local_nx + 1; ++li) {
-            int lj  = 1;
-            int idx = li * pitch + lj;
-            checkCuda(cudaMemcpy(&send_down[li],
-                                 d_p + idx,
-                                 sizeof(double),
-                                 cudaMemcpyDeviceToHost),
-                      "bottom row D2H");
-        }
+        int lj = 1;
+        double* src_ptr = d_p + 0 * pitch + lj;
+        checkCuda(cudaMemcpy2D(send_down.data(), host_pitch_b,
+                               src_ptr,          dev_pitch_b,
+                               col_width_b,      col_height,
+                               cudaMemcpyDeviceToHost),
+                  "bottom row D2H");
     }
+
+    // top row: j = local_ny
     if (up_rank != MPI_PROC_NULL) {
-        for (int li = 0; li <= local_nx + 1; ++li) {
-            int lj  = local_ny;
-            int idx = li * pitch + lj;
-            checkCuda(cudaMemcpy(&send_up[li],
-                                 d_p + idx,
-                                 sizeof(double),
-                                 cudaMemcpyDeviceToHost),
-                      "top row D2H");
-        }
+        int lj = local_ny;
+        double* src_ptr = d_p + 0 * pitch + lj;
+        checkCuda(cudaMemcpy2D(send_up.data(), host_pitch_b,
+                               src_ptr,        dev_pitch_b,
+                               col_width_b,    col_height,
+                               cudaMemcpyDeviceToHost),
+                  "top row D2H");
     }
 
     double t_copy1 = MPI_Wtime();
     time_copy_total += (t_copy1 - t_copy0);
 
-    // --- MPI Sendrecv ---
+    // ===== 2) MPI Sendrecv =====
     double t_comm0 = MPI_Wtime();
 
     if (left_rank != MPI_PROC_NULL) {
@@ -430,99 +432,71 @@ void exchange_halos_2d_gpu(double* d_p,
     double t_comm1 = MPI_Wtime();
     time_comm_total += (t_comm1 - t_comm0);
 
-    // --- write halos back to device ---
+    // ===== 3) Host -> Device =====
     t_copy0 = MPI_Wtime();
 
+    // left halo: li = 0
     if (left_rank != MPI_PROC_NULL) {
-        for (int lj = 0; lj <= local_ny + 1; ++lj) {
-            int li  = 0;
-            int idx = li * pitch + lj;
-            checkCuda(cudaMemcpy(d_p + idx,
-                                 &recv_left[lj],
-                                 sizeof(double),
-                                 cudaMemcpyHostToDevice),
-                      "left halo H2D");
-        }
+        int li = 0;
+        double* dst_ptr = d_p + li * pitch;
+        checkCuda(cudaMemcpy(dst_ptr, recv_left.data(),
+                             row_bytes, cudaMemcpyHostToDevice),
+                  "left halo H2D");
     } else {
-        double zero = 0.0;
-        for (int lj = 0; lj <= local_ny + 1; ++lj) {
-            int li  = 0;
-            int idx = li * pitch + lj;
-            checkCuda(cudaMemcpy(d_p + idx,
-                                 &zero,
-                                 sizeof(double),
-                                 cudaMemcpyHostToDevice),
-                      "left halo zero");
-        }
+        int li = 0;
+        double* dst_ptr = d_p + li * pitch;
+        checkCuda(cudaMemset(dst_ptr, 0, row_bytes),
+                  "left halo zero");
     }
 
+    // right halo: li = local_nx + 1
     if (right_rank != MPI_PROC_NULL) {
-        for (int lj = 0; lj <= local_ny + 1; ++lj) {
-            int li  = local_nx + 1;
-            int idx = li * pitch + lj;
-            checkCuda(cudaMemcpy(d_p + idx,
-                                 &recv_right[lj],
-                                 sizeof(double),
-                                 cudaMemcpyHostToDevice),
-                      "right halo H2D");
-        }
+        int li = local_nx + 1;
+        double* dst_ptr = d_p + li * pitch;
+        checkCuda(cudaMemcpy(dst_ptr, recv_right.data(),
+                             row_bytes, cudaMemcpyHostToDevice),
+                  "right halo H2D");
     } else {
-        double zero = 0.0;
-        for (int lj = 0; lj <= local_ny + 1; ++lj) {
-            int li  = local_nx + 1;
-            int idx = li * pitch + lj;
-            checkCuda(cudaMemcpy(d_p + idx,
-                                 &zero,
-                                 sizeof(double),
-                                 cudaMemcpyHostToDevice),
-                      "right halo zero");
-        }
+        int li = local_nx + 1;
+        double* dst_ptr = d_p + li * pitch;
+        checkCuda(cudaMemset(dst_ptr, 0, row_bytes),
+                  "right halo zero");
     }
 
+    // bottom halo: j = 0  (колонка)
     if (down_rank != MPI_PROC_NULL) {
-        for (int li = 0; li <= local_nx + 1; ++li) {
-            int lj  = 0;
-            int idx = li * pitch + lj;
-            checkCuda(cudaMemcpy(d_p + idx,
-                                 &recv_down[li],
-                                 sizeof(double),
-                                 cudaMemcpyHostToDevice),
-                      "bottom halo H2D");
-        }
+        int lj = 0;
+        double* dst_ptr = d_p + 0 * pitch + lj;
+        checkCuda(cudaMemcpy2D(dst_ptr,        dev_pitch_b,
+                               recv_down.data(), host_pitch_b,
+                               col_width_b,    col_height,
+                               cudaMemcpyHostToDevice),
+                  "bottom halo H2D");
     } else {
-        double zero = 0.0;
-        for (int li = 0; li <= local_nx + 1; ++li) {
-            int lj  = 0;
-            int idx = li * pitch + lj;
-            checkCuda(cudaMemcpy(d_p + idx,
-                                 &zero,
-                                 sizeof(double),
-                                 cudaMemcpyHostToDevice),
-                      "bottom halo zero");
-        }
+        int lj = 0;
+        double* dst_ptr = d_p + 0 * pitch + lj;
+        checkCuda(cudaMemset2D(dst_ptr,        dev_pitch_b,
+                               0,              col_width_b,
+                               col_height),
+                  "bottom halo zero");
     }
 
+    // top halo: j = local_ny + 1
     if (up_rank != MPI_PROC_NULL) {
-        for (int li = 0; li <= local_nx + 1; ++li) {
-            int lj  = local_ny + 1;
-            int idx = li * pitch + lj;
-            checkCuda(cudaMemcpy(d_p + idx,
-                                 &recv_up[li],
-                                 sizeof(double),
-                                 cudaMemcpyHostToDevice),
-                      "top halo H2D");
-        }
+        int lj = local_ny + 1;
+        double* dst_ptr = d_p + 0 * pitch + lj;
+        checkCuda(cudaMemcpy2D(dst_ptr,        dev_pitch_b,
+                               recv_up.data(), host_pitch_b,
+                               col_width_b,    col_height,
+                               cudaMemcpyHostToDevice),
+                  "top halo H2D");
     } else {
-        double zero = 0.0;
-        for (int li = 0; li <= local_nx + 1; ++li) {
-            int lj  = local_ny + 1;
-            int idx = li * pitch + lj;
-            checkCuda(cudaMemcpy(d_p + idx,
-                                 &zero,
-                                 sizeof(double),
-                                 cudaMemcpyHostToDevice),
-                      "top halo zero");
-        }
+        int lj = local_ny + 1;
+        double* dst_ptr = d_p + 0 * pitch + lj;
+        checkCuda(cudaMemset2D(dst_ptr,        dev_pitch_b,
+                               0,              col_width_b,
+                               col_height),
+                  "top halo zero");
     }
 
     t_copy1 = MPI_Wtime();
